@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<menu xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <item android:title="Bản đồ"
+        android:icon="@drawable/map_location_dot"
+        android:id="@+id/mapBtn"
+        />
+    <item android:title="Cảm biến"
+        android:icon="@drawable/chart_network"
+        android:id="@+id/sensorBtn"
+        />
+    <item
+        android:id="@+id/sosBtn"
+        android:title="Quản lý SOS"
+        android:icon="@drawable/users"
+        />
+    <item android:title="Nguồn lực"
+        android:icon="@drawable/box_open"
+        android:id="@+id/resourceBtn"
+        />
+
+    <item android:title="Báo cáo"
+        android:icon="@drawable/chart_pie"
+        android:id="@+id/reportBtn"
+        />
+</menu>
