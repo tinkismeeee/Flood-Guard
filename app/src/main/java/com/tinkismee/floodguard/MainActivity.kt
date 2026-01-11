@@ -5,6 +5,7 @@ import androidx.activity.enableEdgeToEdge
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
+import androidx.fragment.app.Fragment
 import androidx.fragment.app.FragmentContainerView
 import com.google.android.material.bottomnavigation.BottomNavigationView
 
@@ -20,17 +21,33 @@ class MainActivity : AppCompatActivity() {
             v.setPadding(systemBars.left, systemBars.top, systemBars.right, systemBars.bottom)
             insets
         }
+        supportFragmentManager.beginTransaction().replace(R.id.fragmentContainerView, map()).commit()
 
         initVars()
+        bottomNavBar.setOnItemSelectedListener {
+            when (it.itemId) {
+                R.id.mapBtn -> replaceFragment(map())
+//                R.id.sensorBtn -> replaceFragment(main_profile())
+//                R.id.sosBtn -> replaceFragment(my_booking_fragment())
+//                R.id.resourceBtn -> replaceFragment(about_fragment())
+//                R.id.reportBtn -> replaceFragment(about_fragment())
+                else -> return@setOnItemSelectedListener false
+            }
+            true
+        }
     }
-
 
     private fun initVars() {
         bottomNavBar = findViewById<BottomNavigationView>(R.id.bottomNavBar)
         fragmentContainer = findViewById<FragmentContainerView>(R.id.fragmentContainerView)
     }
 
-    private fun changeFragment() {
-
+    private fun replaceFragment(fragment: Fragment) {
+        val currentFragment = supportFragmentManager.findFragmentById(R.id.fragmentContainerView)
+        if (currentFragment?.javaClass == fragment.javaClass) return
+        supportFragmentManager.beginTransaction()
+            .replace(R.id.fragmentContainerView, fragment)
+            .commit()
     }
+
 }
