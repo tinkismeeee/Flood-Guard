@@ -27,8 +27,8 @@ class MainActivity : AppCompatActivity() {
         bottomNavBar.setOnItemSelectedListener {
             when (it.itemId) {
                 R.id.mapBtn -> replaceFragment(map())
-//                R.id.sensorBtn -> replaceFragment(main_profile())
-//                R.id.sosBtn -> replaceFragment(my_booking_fragment())
+                R.id.sensorBtn -> replaceFragment(sensor_data())
+                R.id.sosBtn -> replaceFragment(ManageSOSFragment())
 //                R.id.resourceBtn -> replaceFragment(about_fragment())
 //                R.id.reportBtn -> replaceFragment(about_fragment())
                 else -> return@setOnItemSelectedListener false

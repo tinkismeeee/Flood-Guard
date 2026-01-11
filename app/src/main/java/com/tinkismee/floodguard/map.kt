@@ -7,12 +7,15 @@ import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.DashPathEffect
 import android.graphics.Paint
-import android.widget.Button
 import android.graphics.drawable.BitmapDrawable
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.util.Log
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
+import android.widget.Button
 import androidx.core.content.ContextCompat
 import androidx.core.graphics.drawable.toBitmap
 import androidx.core.graphics.drawable.toDrawable
@@ -24,22 +27,38 @@ import org.osmdroid.views.overlay.Marker
 import org.osmdroid.views.overlay.Polygon
 import org.osmdroid.views.overlay.mylocation.GpsMyLocationProvider
 import org.osmdroid.views.overlay.mylocation.MyLocationNewOverlay
+import retrofit2.Call
+import retrofit2.Callback
+import retrofit2.Response
 
 class map : Fragment() {
 
     private lateinit var mapView: MapView
-
     private var myLocationOverlay: MyLocationNewOverlay? = null
-
-    private val dangerMarkers = mutableListOf<Marker>()
-    private val dangerCircles = mutableListOf<Polygon>()
     private lateinit var createSOS: Button
+    private lateinit var dangerZones: Button
 
     private val LOCATION_REQUEST_CODE = 1001
 
+    // ====== overlays lấy từ API reports ======
+    private val reportMarkers = mutableListOf<Marker>()
+    private val reportCircles = mutableListOf<Polygon>()
+
+    // ====== overlays mẫu ======
+    private val sampleMarkers = mutableListOf<Marker>()
+    private val sampleCircles = mutableListOf<Polygon>()
+
+    // ====== polling ======
+    private val handler = Handler(Looper.getMainLooper())
+    private var pollingRunnable: Runnable? = null
+    private var isPolling = false
+    private val POLL_INTERVAL_MS = 5000L // 5 giây
+
+    // ====== toggle danger circles ======
+    private var showDangerCircles = true
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-
         Configuration.getInstance().userAgentValue = requireContext().packageName
     }
 
@@ -54,23 +73,41 @@ class map : Fragment() {
         super.onViewCreated(view, savedInstanceState)
 
         mapView = view.findViewById(R.id.map)
+        createSOS = view.findViewById(R.id.createSOS)
+        dangerZones = view.findViewById(R.id.dangerZonesBtn)
 
         initMap()
         requestLocationPermissionIfNeeded()
-        createSOS = view.findViewById(R.id.createSOS)
+
+        addSafePointMarker()
+        addSampleDangerPoints()
+
         createSOS.setOnClickListener {
             startActivity(Intent(requireContext(), CreateSOS::class.java))
         }
+
+        dangerZones.setOnClickListener {
+            showDangerCircles = !showDangerCircles
+            updateDangerCirclesVisibility()
+        }
+
+        // set text ban đầu
+        updateDangerCirclesVisibility()
     }
 
     override fun onResume() {
         super.onResume()
         mapView.onResume()
         myLocationOverlay?.enableMyLocation()
+
+        startPollingReports()
     }
 
     override fun onPause() {
         super.onPause()
+
+        stopPollingReports()
+
         myLocationOverlay?.disableMyLocation()
         mapView.onPause()
     }
@@ -80,24 +117,9 @@ class map : Fragment() {
     private fun initMap() {
         mapView.setMultiTouchControls(true)
 
-        val defaultPoint = GeoPoint(10.8231, 106.6297)
+        val defaultPoint = GeoPoint(10.8231, 106.6297) // HCM
         mapView.controller.setZoom(13.0)
         mapView.controller.setCenter(defaultPoint)
-
-        addDangerZone(
-            center = GeoPoint(10.83, 106.62),
-            radiusMeters = 800.0,
-            title = "Cảnh báo: Lũ quét",subDescription = "Test",
-            snippet = "Test"
-        )
-
-        addDangerZone(
-            center = GeoPoint(10.81, 106.65),
-            radiusMeters = 500.0,
-            title = "Cảnh báo: Ngập",
-            subDescription = "Test",
-            snippet = "Test"
-        )
     }
 
     // ======================== LOCATION ========================
@@ -131,7 +153,6 @@ class map : Fragment() {
 
         mapView.overlays.add(myLocationOverlay)
 
-        // bay tới vị trí hiện tại khi GPS fix lần đầu
         myLocationOverlay?.runOnFirstFix {
             activity?.runOnUiThread {
                 val loc = myLocationOverlay?.myLocation ?: return@runOnUiThread
@@ -159,18 +180,187 @@ class map : Fragment() {
         }
     }
 
-    // ======================== DANGER ZONE ========================
+    // ======================== POLLING ========================
 
-    /**
-     * ✅ Hàm này sẽ:
-     * - Vẽ marker icon location_exclamation
-     * - Vẽ vòng tròn đỏ bán kính nguy hiểm
-     */
-    private fun addDangerZone(center: GeoPoint, radiusMeters: Double, title: String, subDescription: String, snippet: String) {
-        val circle = object : Polygon(mapView) {
-            override fun onSingleTapConfirmed(e: android.view.MotionEvent?, mapView: MapView?): Boolean {
-                return false
+    private fun startPollingReports() {
+        if (isPolling) return
+        isPolling = true
+
+        pollingRunnable = object : Runnable {
+            override fun run() {
+                loadReportsAndDraw()
+                handler.postDelayed(this, POLL_INTERVAL_MS)
             }
+        }
+
+        handler.post(pollingRunnable!!)
+    }
+
+    private fun stopPollingReports() {
+        isPolling = false
+        pollingRunnable?.let { handler.removeCallbacks(it) }
+        pollingRunnable = null
+    }
+
+    // ======================== API REPORTS -> DRAW ========================
+
+    private fun loadReportsAndDraw() {
+        RetrofitClient.instance.getReports().enqueue(object : Callback<List<Report>> {
+
+            override fun onResponse(call: Call<List<Report>>, response: Response<List<Report>>) {
+                if (!response.isSuccessful) {
+                    Log.e("DEBUG", "Get reports failed: ${response.code()} ${response.errorBody()?.string()}")
+                    return
+                }
+
+                val reports = (response.body() ?: emptyList())
+                    .filter { it.status == "pending" }
+
+                clearReportOverlays()
+
+                reports.forEach { r ->
+                    drawReport(r)
+                }
+
+                // ✅ nếu đang tắt vòng tròn thì đảm bảo nó không tự bật lại khi polling
+                updateDangerCirclesVisibility()
+
+                mapView.invalidate()
+            }
+
+            override fun onFailure(call: Call<List<Report>>, t: Throwable) {
+                Log.e("DEBUG", "API error: ${t.message}")
+            }
+        })
+    }
+
+    private fun drawReport(r: Report) {
+        val center = GeoPoint(r.lat, r.lng)
+
+        val radiusMeters = when (r.type) {
+            "sos" -> 350.0
+            "flood_report" -> 800.0
+            "resource_request" -> 500.0
+            else -> 400.0
+        }
+
+        val circle = createDangerCircle(center, radiusMeters)
+
+        val marker = Marker(mapView).apply {
+            position = center
+            setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
+
+            title = when (r.type) {
+                "sos" -> "🆘 SOS"
+                "flood_report" -> "⚠️ Báo cáo lụt"
+                "resource_request" -> "📦 Yêu cầu tiếp tế"
+                else -> "Report"
+            }
+
+            // message nằm trên
+            snippet = r.message ?: ""
+
+            icon = scale(R.drawable.location_exclamation, 0.08f)
+        }
+
+        reportCircles.add(circle)
+        reportMarkers.add(marker)
+
+        // ✅ chỉ add circle nếu đang bật
+        if (showDangerCircles) {
+            mapView.overlays.add(circle)
+        }
+        mapView.overlays.add(marker)
+    }
+
+    private fun clearReportOverlays() {
+        reportMarkers.forEach { mapView.overlays.remove(it) }
+        reportCircles.forEach { mapView.overlays.remove(it) }
+        reportMarkers.clear()
+        reportCircles.clear()
+    }
+
+    // ======================== SAFE POINT ========================
+
+    private fun addSafePointMarker() {
+        val safePoint = GeoPoint(10.7769942, 106.6927272)
+
+        val safeMarker = Marker(mapView).apply {
+            position = safePoint
+            setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
+
+            title = "✅ Điểm tập kết an toàn"
+            snippet = "Tập kết tại đây để đảm bảo an toàn"
+
+            icon = scale(R.drawable.location_check, 0.08f)
+        }
+
+        mapView.overlays.add(safeMarker)
+        mapView.invalidate()
+    }
+
+    // ======================== SAMPLE DANGER ========================
+
+    private fun addSampleDangerPoints() {
+        val samples = listOf(
+            Triple(GeoPoint(10.7842137, 106.6738485), 800.0, "⚠️ Cảnh báo điểm ngập lụt"),
+            Triple(GeoPoint(10.7690412, 106.7406133), 1500.0, "⚠️ Cảnh báo điểm ngập lụt"),
+            Triple(GeoPoint(10.75518, 106.7649042), 2650.0, "⚠️ Cảnh báo điểm ngập lụt"),
+            Triple(GeoPoint(10.789693, 106.7866485), 400.0, "⚠️ Cảnh báo điểm ngập lụt")
+        )
+
+        samples.forEach { (center, radius, title) ->
+            val circle = createDangerCircle(center, radius)
+
+            val marker = Marker(mapView).apply {
+                position = center
+                setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
+                this.title = title
+                snippet = "Lũ có thể dâng cao trong vòng ${(15..50).random()} phút nữa"
+                icon = scale(R.drawable.location_exclamation, 0.08f)
+            }
+
+            sampleCircles.add(circle)
+            sampleMarkers.add(marker)
+
+            // ✅ chỉ add circle nếu đang bật
+            if (showDangerCircles) {
+                mapView.overlays.add(circle)
+            }
+            mapView.overlays.add(marker)
+        }
+
+        mapView.invalidate()
+    }
+
+    // ======================== TOGGLE DANGER CIRCLES ========================
+
+    private fun updateDangerCirclesVisibility() {
+        val allCircles = reportCircles + sampleCircles
+
+        if (showDangerCircles) {
+            allCircles.forEach { circle ->
+                if (!mapView.overlays.contains(circle)) {
+                    mapView.overlays.add(circle)
+                }
+            }
+            dangerZones.text = "Tắt vùng nguy hiểm"
+        } else {
+            allCircles.forEach { circle ->
+                mapView.overlays.remove(circle)
+            }
+            dangerZones.text = "Bật vùng nguy hiểm"
+        }
+
+        mapView.invalidate()
+    }
+
+    // ======================== DANGER CIRCLE FACTORY ========================
+
+    private fun createDangerCircle(center: GeoPoint, radiusMeters: Double): Polygon {
+        return object : Polygon(mapView) {
+            override fun onSingleTapConfirmed(e: android.view.MotionEvent?, mapView: MapView?): Boolean = false
+            override fun onLongPress(e: android.view.MotionEvent?, mapView: MapView?): Boolean = false
         }.apply {
             points = Polygon.pointsAsCircle(center, radiusMeters)
             fillColor = Color.argb(70, 255, 0, 0)
@@ -183,36 +373,6 @@ class map : Fragment() {
                 isAntiAlias = true
             }
         }
-
-        val dangerMarker = Marker(mapView).apply {
-            position = center
-            setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
-            icon = scale(R.drawable.location_exclamation, 0.08f)
-            this.title = title
-            this.subDescription = subDescription
-            this.snippet = snippet
-        }
-
-        dangerMarkers.add(dangerMarker)
-        mapView.overlays.add(dangerMarker)
-
-
-        dangerCircles.add(circle)
-        mapView.overlays.add(circle)
-
-        mapView.invalidate()
-    }
-
-    /**
-     * ✅ Dùng khi bạn load realtime từ API:
-     * clear old zones rồi add lại theo dữ liệu mới.
-     */
-    private fun clearDangerZones() {
-        dangerMarkers.forEach { mapView.overlays.remove(it) }
-        dangerCircles.forEach { mapView.overlays.remove(it) }
-        dangerMarkers.clear()
-        dangerCircles.clear()
-        mapView.invalidate()
     }
 
     // ======================== ICON SCALE ========================
